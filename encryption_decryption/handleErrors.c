@@ -5,7 +5,10 @@
 #include <openssl/rand.h> // For cryptographically secure random numbers
 #include <openssl/err.h>  // For error handling
 
+#include "handleErrors.h"
+
 void handleErrors(void)
 {
     ERR_print_errors_fp(stderr);
     abort();
+}

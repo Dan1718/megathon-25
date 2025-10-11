@@ -8,8 +8,8 @@
 #define AUTH_PORT 9000
 // IMPORTANT: Change this IP to the actual IP address of your server.
 // "127.0.0.1" works if the client and server are on the same machine.
-#define SERVER_IP "127.0.0.1" 
-// #define SERVER_IP "10.53.138.156" // Use this line if your server is at this IP
+//#define SERVER_IP "127.0.0.1" 
+#define SERVER_IP "10.53.138.156" // Use this line if your server is at this IP
 
 
 int connect_to_server(const char* ip, int port);

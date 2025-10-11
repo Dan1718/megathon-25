@@ -5,6 +5,9 @@
 #include <pango/pangocairo.h> // For drawing text labels
 #include <math.h> // For floor() in HSV conversion
 
+// --- Forward Declaration ---
+static void create_editor_window(GtkApplication *app, GFile *file_to_open);
+
 // --- Structures ---
 
 // A struct to hold pointers to widgets we need in different functions.
@@ -263,7 +266,7 @@ static void on_overlay_motion(GtkEventControllerMotion *controller, double x, do
     }
     
     if (data->hovered_cursor_index != previously_hovered) {
-        gtk_widget_queue_draw(GTK_WIDGET(g_object_get_data(G_OBJECT(controller), "overlay")));
+        gtk_widget_queue_draw(GTK_WIDGET(g_object_get_data(G_OBJECT(controller), "overlay_area_to_draw")));
     }
 }
 
@@ -272,7 +275,7 @@ static void on_overlay_leave(GtkEventControllerMotion *controller, gpointer user
     DrawCallbackData *data = (DrawCallbackData *)user_data;
     if (data->hovered_cursor_index != -1) {
         data->hovered_cursor_index = -1;
-        gtk_widget_queue_draw(GTK_WIDGET(g_object_get_data(G_OBJECT(controller), "overlay")));
+        gtk_widget_queue_draw(GTK_WIDGET(g_object_get_data(G_OBJECT(controller), "overlay_area_to_draw")));
     }
 }
 
@@ -518,6 +521,18 @@ static void cleanup_widgets_data(gpointer user_data) {
 // --- Main Application Setup ---
 
 static void activate(GtkApplication *app, gpointer user_data) {
+    // This is called when the app is run with no files. Create a blank window.
+    create_editor_window(app, NULL);
+}
+
+// This is called when the app is launched with files to open from the command line.
+static void on_app_open(GApplication *app, GFile **files, int n_files, const char *hint, gpointer user_data) {
+    for (int i = 0; i < n_files; i++) {
+        create_editor_window(GTK_APPLICATION(app), files[i]);
+    }
+}
+
+static void create_editor_window(GtkApplication *app, GFile *file_to_open) {
     GtkCssProvider *css_provider = gtk_css_provider_new();
     const char *css = "headerbar button { background-image: none; background-color: #E0E0E0; border: 1px solid #BDBDBD; box-shadow: 0 1px 1px rgba(0,0,0,0.1); } "
                       "headerbar button:hover { background-color: #D3D3D3; } "
@@ -600,6 +615,22 @@ static void activate(GtkApplication *app, gpointer user_data) {
     widgets->save_notification_revealer = GTK_REVEALER(save_notification_revealer);
     widgets->log_buffer = NULL; // Will be set by the logging window
 
+    // --- Load File Content (if a file was provided) ---
+    if (file_to_open != NULL) {
+        char *contents = NULL;
+        gsize length = 0;
+        GError *error = NULL;
+
+        if (g_file_load_contents(file_to_open, NULL, &contents, &length, NULL, &error)) {
+            gtk_text_buffer_set_text(buffer, contents, length);
+            g_free(contents);
+            widgets->current_file = g_object_ref(file_to_open); // Store the file
+        } else {
+            g_warning("Failed to open file: %s", error->message);
+            g_error_free(error);
+        }
+    }
+    
     // --- Setup Remote Cursors ---
     GtkTextIter start_iter;
     gtk_text_buffer_get_start_iter(buffer, &start_iter);
@@ -651,6 +682,8 @@ static void activate(GtkApplication *app, gpointer user_data) {
 
     // --- Setup Cursor Drawing Overlay ---
     GtkWidget *cursor_overlay_area = gtk_drawing_area_new();
+    // This makes the drawing area transparent to input events, fixing text selection.
+    gtk_widget_set_can_target(cursor_overlay_area, FALSE);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), cursor_overlay_area);
     DrawCallbackData *draw_data = g_new(DrawCallbackData, 1);
     draw_data->textview = GTK_TEXT_VIEW(textview);
@@ -687,10 +720,12 @@ static void activate(GtkApplication *app, gpointer user_data) {
     g_signal_connect(textview, "size-allocate", G_CALLBACK(on_view_changed), cursor_overlay_area);
     
     GtkEventController *motion = gtk_event_controller_motion_new();
-    g_object_set_data(G_OBJECT(motion), "overlay", cursor_overlay_area);
+    // We pass the drawing area to the callback so it knows what to redraw.
+    g_object_set_data(G_OBJECT(motion), "overlay_area_to_draw", cursor_overlay_area);
     g_signal_connect(motion, "motion", G_CALLBACK(on_overlay_motion), draw_data);
     g_signal_connect(motion, "leave", G_CALLBACK(on_overlay_leave), draw_data);
-    gtk_widget_add_controller(cursor_overlay_area, motion);
+    // Add the controller to the parent overlay, not the drawing area itself.
+    gtk_widget_add_controller(overlay, motion);
 
 
     g_signal_connect(save_button, "clicked", G_CALLBACK(on_save_button_clicked), widgets);
@@ -726,8 +761,9 @@ int main(int argc, char **argv) {
     GtkApplication *app;
     int status;
     srand(time(NULL));
-    app = gtk_application_new("com.example.c.texteditor", G_APPLICATION_DEFAULT_FLAGS);
+    app = gtk_application_new("com.example.c.texteditor", G_APPLICATION_HANDLES_OPEN | G_APPLICATION_NON_UNIQUE);
     g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
+    g_signal_connect(app, "open", G_CALLBACK(on_app_open), NULL);
     status = g_application_run(G_APPLICATION(app), argc, argv);
     g_object_unref(app);
     return status;

@@ -39,7 +39,7 @@ Who's doing what
 **Arnav** : On charge of authentication. 
 - auth.c
 	- Has the methods signup, login, authenticate, encrypt, decrypt
-**Navneeth** : Researching on conflict resolution.
+**Navneet** : Researching on conflict resolution, how text buffer works etc. 
 **Navya** : Working on UI.
 **Dan** : Working on websocket implementation.
 - sockets.c 

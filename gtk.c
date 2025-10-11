@@ -15,6 +15,7 @@ typedef struct {
     GtkLabel *cursor_pos_label;
     GFile *current_file; // Holds the file for subsequent saves
     GtkRevealer *save_notification_revealer;
+    GtkTextBuffer *log_buffer; // Buffer for the live log window
 } AppWidgets;
 
 // Represents a simulated remote user's cursor and selection.
@@ -438,6 +439,72 @@ static void on_color_notify(GObject *object, GParamSpec *pspec, gpointer user_da
 }
 
 
+// --- Change Logging ---
+// This entire section can be removed for the final implementation.
+
+// Helper to append a formatted string to the log buffer.
+static void log_change(AppWidgets *widgets, const char *format, ...) {
+    if (!widgets->log_buffer) return;
+    char *message;
+    va_list args;
+    va_start(args, format);
+    message = g_strdup_vprintf(format, args);
+    va_end(args);
+
+    GtkTextIter end;
+    gtk_text_buffer_get_end_iter(widgets->log_buffer, &end);
+    gtk_text_buffer_insert(widgets->log_buffer, &end, message, -1);
+    gtk_text_buffer_insert(widgets->log_buffer, &end, "\n", -1);
+    g_free(message);
+}
+
+// Callback for the "insert-text" signal.
+static void on_buffer_insert_text(GtkTextBuffer *buffer, GtkTextIter *location, char *text, int len, gpointer user_data) {
+    AppWidgets *widgets = (AppWidgets *)user_data;
+    int offset = gtk_text_iter_get_offset(location);
+    // Escape special characters in the inserted text for logging
+    char *escaped_text = g_strescape(text, NULL);
+    log_change(widgets, "[INSERT] at offset %d: \"%s\"", offset, escaped_text);
+    g_free(escaped_text);
+}
+
+// Callback for the "delete-range" signal.
+static void on_buffer_delete_range(GtkTextBuffer *buffer, GtkTextIter *start, GtkTextIter *end, gpointer user_data) {
+    AppWidgets *widgets = (AppWidgets *)user_data;
+    int start_offset = gtk_text_iter_get_offset(start);
+    int end_offset = gtk_text_iter_get_offset(end);
+    log_change(widgets, "[DELETE] from offset %d to %d", start_offset, end_offset);
+}
+
+// Callback for the "apply-tag" signal.
+static void on_buffer_apply_tag(GtkTextBuffer *buffer, GtkTextTag *tag, GtkTextIter *start, GtkTextIter *end, gpointer user_data) {
+    AppWidgets *widgets = (AppWidgets *)user_data;
+    const char *tag_name;
+    g_object_get(tag, "name", &tag_name, NULL);
+    int start_offset = gtk_text_iter_get_offset(start);
+    int end_offset = gtk_text_iter_get_offset(end);
+    // We don't want to log the simulated user selection tags.
+    if (g_strcmp0(tag_name, "sel_alex") != 0 && g_strcmp0(tag_name, "sel_jordan") != 0) {
+        log_change(widgets, "[APPLY_TAG] '%s' from %d to %d", tag_name, start_offset, end_offset);
+    }
+    g_free((void*)tag_name);
+}
+
+// Callback for the "remove-tag" signal.
+static void on_buffer_remove_tag(GtkTextBuffer *buffer, GtkTextTag *tag, GtkTextIter *start, GtkTextIter *end, gpointer user_data) {
+    AppWidgets *widgets = (AppWidgets *)user_data;
+    const char *tag_name;
+    g_object_get(tag, "name", &tag_name, NULL);
+    int start_offset = gtk_text_iter_get_offset(start);
+    int end_offset = gtk_text_iter_get_offset(end);
+    // We don't want to log the simulated user selection tags.
+    if (g_strcmp0(tag_name, "sel_alex") != 0 && g_strcmp0(tag_name, "sel_jordan") != 0) {
+        log_change(widgets, "[REMOVE_TAG] '%s' from %d to %d", tag_name, start_offset, end_offset);
+    }
+    g_free((void*)tag_name);
+}
+
+
 // --- Main Application Cleanup ---
 
 static void cleanup_widgets_data(gpointer user_data) {
@@ -505,7 +572,7 @@ static void activate(GtkApplication *app, gpointer user_data) {
     gtk_widget_set_halign(save_notification_revealer, GTK_ALIGN_CENTER);
     gtk_widget_set_margin_bottom(save_notification_revealer, 20);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), save_notification_revealer);
-    GtkWidget *save_notification_label = gtk_label_new("Changes saved! :)");
+    GtkWidget *save_notification_label = gtk_label_new("Changes saved! :D");
     gtk_widget_add_css_class(save_notification_label, "notification-label");
     gtk_revealer_set_child(GTK_REVEALER(save_notification_revealer), save_notification_label);
 
@@ -531,6 +598,7 @@ static void activate(GtkApplication *app, gpointer user_data) {
     widgets->word_count_label = GTK_LABEL(word_count_label);
     widgets->current_file = NULL; // Initialize current file to NULL
     widgets->save_notification_revealer = GTK_REVEALER(save_notification_revealer);
+    widgets->log_buffer = NULL; // Will be set by the logging window
 
     // --- Setup Remote Cursors ---
     GtkTextIter start_iter;
@@ -595,6 +663,22 @@ static void activate(GtkApplication *app, gpointer user_data) {
     timer_data->overlay_area = cursor_overlay_area;
     g_timeout_add_seconds(7, move_remote_cursors, timer_data); // Changed to 7 seconds
     
+    // --- Setup Change Logging Window ---
+    GtkWidget *log_window = gtk_application_window_new(app);
+    gtk_window_set_title(GTK_WINDOW(log_window), "Live Log");
+    gtk_window_set_default_size(GTK_WINDOW(log_window), 500, 700);
+    gtk_window_set_transient_for(GTK_WINDOW(log_window), GTK_WINDOW(window));
+
+    GtkWidget *log_scrolled_window = gtk_scrolled_window_new();
+    gtk_window_set_child(GTK_WINDOW(log_window), log_scrolled_window);
+    GtkWidget *log_view = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(log_view), FALSE);
+    gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(log_view), FALSE);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(log_scrolled_window), log_view);
+    widgets->log_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(log_view));
+    log_change(widgets, "--- Log Started ---");
+
+
     // --- Connect Signals ---
     GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(scrolled_window));
     GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(scrolled_window));
@@ -619,6 +703,13 @@ static void activate(GtkApplication *app, gpointer user_data) {
     g_signal_connect(buffer, "changed", G_CALLBACK(on_buffer_changed_cb), widgets);
     g_signal_connect(buffer, "mark-set", G_CALLBACK(on_mark_set_cb), widgets);
 
+    // --- Connect Logging Signals ---
+    g_signal_connect(buffer, "insert-text", G_CALLBACK(on_buffer_insert_text), widgets);
+    g_signal_connect(buffer, "delete-range", G_CALLBACK(on_buffer_delete_range), widgets);
+    g_signal_connect(buffer, "apply-tag", G_CALLBACK(on_buffer_apply_tag), widgets);
+    g_signal_connect(buffer, "remove-tag", G_CALLBACK(on_buffer_remove_tag), widgets);
+
+
     // Connect signals to free memory when the window is closed
     g_signal_connect(window, "destroy", G_CALLBACK(cleanup_widgets_data), widgets);
     g_signal_connect_swapped(window, "destroy", G_CALLBACK(g_free), draw_data);
@@ -628,6 +719,7 @@ static void activate(GtkApplication *app, gpointer user_data) {
     g_signal_connect_swapped(window, "destroy", G_CALLBACK(g_free), cursors);
 
     gtk_window_present(GTK_WINDOW(window));
+    gtk_window_present(GTK_WINDOW(log_window));
 }
 
 int main(int argc, char **argv) {

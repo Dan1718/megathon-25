@@ -5,7 +5,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
-#define PORT 9001
+#define PORT 9002
 
 int main() {
     int sock = 0;

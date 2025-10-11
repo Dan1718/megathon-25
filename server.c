@@ -14,7 +14,7 @@
 // --- Configuration ---
 #define AUTH_PORT 9000
 #define START_SERVICE_PORT 9001
-#define END_SERVICE_PORT 9002
+#define END_SERVICE_PORT 9010
 #define MAX_SERVICE_PORTS (END_SERVICE_PORT - START_SERVICE_PORT + 1)
 
 // --- Data Structures ---
@@ -26,7 +26,6 @@ struct PortMapping {
 };
 
 // Global variable to hold port statuses.
-// A global is used so the signal handler can access it.
 struct PortMapping service_ports[MAX_SERVICE_PORTS];
 
 
@@ -34,23 +33,27 @@ struct PortMapping service_ports[MAX_SERVICE_PORTS];
 void handle_client(int client_socket, int port);
 void print_server_ip();
 void sigchld_handler(int s);
-int find_free_port();
+int find_free_port_pair(); // MODIFIED
 void initialize_service_ports();
 void handle_authentication(int auth_listener_fd);
 
 
 int main() {
+    // Ensure we have an even number of service ports for pairing
+    if (MAX_SERVICE_PORTS % 2 != 0) {
+        fprintf(stderr, "Error: MAX_SERVICE_PORTS must be an even number for pairing.\n");
+        exit(EXIT_FAILURE);
+    }
+
     int auth_listener_fd;
     int service_listener_fds[MAX_SERVICE_PORTS];
     int service_listener_count = 0;
     struct sockaddr_in address;
     int opt = 1;
 
-    // Print the server's IP address so clients know where to connect
     print_server_ip();
     initialize_service_ports();
 
-    // Set up a signal handler to clean up child processes (zombies)
     struct sigaction sa;
     sa.sa_handler = sigchld_handler;
     sigemptyset(&sa.sa_mask);
@@ -78,7 +81,6 @@ int main() {
         exit(EXIT_FAILURE);
     }
     printf("Authentication server listening on port %d\n", AUTH_PORT);
-
 
     // 2. Create a listening socket for each SERVICE port in the range
     for (int port = START_SERVICE_PORT; port <= END_SERVICE_PORT; port++) {
@@ -108,7 +110,6 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
-
     // 3. Main loop to accept connections
     printf("\n++++ Waiting for connections ++++\n");
     while(1) {
@@ -116,7 +117,6 @@ int main() {
         int max_fd = auth_listener_fd;
         FD_ZERO(&read_fds);
 
-        // Add auth socket and all service sockets to the set
         FD_SET(auth_listener_fd, &read_fds);
         for (int i = 0; i < service_listener_count; i++) {
             FD_SET(service_listener_fds[i], &read_fds);
@@ -130,12 +130,10 @@ int main() {
             perror("select error");
         }
 
-        // --- Check for an authentication request ---
         if (FD_ISSET(auth_listener_fd, &read_fds)) {
             handle_authentication(auth_listener_fd);
         }
 
-        // --- Check for a connection on a service port ---
         for (int i = 0; i < service_listener_count; i++) {
             if (FD_ISSET(service_listener_fds[i], &read_fds)) {
                 int new_socket;
@@ -150,19 +148,24 @@ int main() {
 
                 pid_t pid = fork();
                 if (pid == 0) {
-                    // --- This is the CHILD process ---
-                    close(auth_listener_fd); // Child doesn't need any listeners
+                    // --- CHILD process ---
+                    close(auth_listener_fd);
                     for(int j = 0; j < service_listener_count; j++) {
                         close(service_listener_fds[j]);
                     }
                     handle_client(new_socket, current_port);
                     exit(0);
                 } else if (pid > 0) {
-                    // --- This is the PARENT process ---
-                    close(new_socket); // Parent doesn't need the client socket
-                    // Mark this port as in use by the new child
-                    service_ports[i].in_use = 1;
-                    service_ports[i].pid = pid;
+                    // --- PARENT process ---
+                    close(new_socket);
+                    // MODIFICATION: Mark both ports in the pair as in-use
+                    int base_index = (i % 2 == 0) ? i : i - 1;
+                    service_ports[base_index].in_use = 1;
+                    service_ports[base_index].pid = pid;
+                    service_ports[base_index + 1].in_use = 1;
+                    service_ports[base_index + 1].pid = pid;
+                    printf("Parent: Marked port pair %d/%d as busy for PID %d.\n", 
+                           service_ports[base_index].port, service_ports[base_index + 1].port, pid);
                 } else {
                     perror("fork");
                     close(new_socket);
@@ -175,7 +178,6 @@ int main() {
 
 /**
  * @brief Handles an incoming authentication request.
- * It is handled directly by the main process without forking.
  */
 void handle_authentication(int auth_listener_fd) {
     struct sockaddr_in address;
@@ -189,28 +191,26 @@ void handle_authentication(int auth_listener_fd) {
     printf("Received an authentication request.\n");
     char buffer[1024] = {0};
     read(auth_socket, buffer, 1023);
-
-    // Remove trailing newline character, if any
     buffer[strcspn(buffer, "\r\n")] = 0;
 
-    // Super simple authentication check
     if (strcmp(buffer, "user:pass") == 0) {
-        int free_port = find_free_port();
+        // MODIFICATION: Find a pair of ports instead of a single one.
+        int free_port = find_free_port_pair();
         if (free_port != 0) {
-            printf("Authentication successful. Assigning port %d.\n", free_port);
+            printf("Authentication successful. Assigning port pair starting at %d.\n", free_port);
             char port_str[16];
             snprintf(port_str, sizeof(port_str), "%d", free_port);
             send(auth_socket, port_str, strlen(port_str), 0);
         } else {
-            printf("Authentication successful, but no free ports.\n");
-            send(auth_socket, "0", 1, 0); // "0" indicates no port available
+            printf("Authentication successful, but no free port pairs available.\n");
+            send(auth_socket, "0", 1, 0);
         }
     } else {
         printf("Authentication failed for received string: \"%s\".\n", buffer);
-        send(auth_socket, "0", 1, 0); // "0" indicates failure
+        send(auth_socket, "0", 1, 0);
     }
 
-    close(auth_socket); // Always close the connection after the attempt
+    close(auth_socket);
 }
 
 /**
@@ -226,35 +226,45 @@ void initialize_service_ports() {
 
 
 /**
- * @brief Finds the first available service port.
- * @return The port number if one is free, otherwise 0.
+ * @brief NEW: Finds the first available PAIR of service ports.
+ * @return The first port number of the pair if one is free, otherwise 0.
  */
-int find_free_port() {
-    for (int i = 0; i < MAX_SERVICE_PORTS; i++) {
-        if (!service_ports[i].in_use) {
-            return service_ports[i].port;
+int find_free_port_pair() {
+    // Iterate by 2 to check for pairs
+    for (int i = 0; i < MAX_SERVICE_PORTS - 1; i += 2) {
+        // Check if both the current port and the next one are free
+        if (!service_ports[i].in_use && !service_ports[i+1].in_use) {
+            return service_ports[i].port; // Return the first port of the free pair
         }
     }
-    return 0; // No free ports
+    return 0; // No free pairs
 }
 
 /**
- * @brief Signal handler to clean up terminated child processes (zombies).
- * It also marks the port used by the child as free.
+ * @brief MODIFIED: Signal handler to clean up terminated child processes (zombies).
+ * It also marks the PAIR of ports used by the child as free.
  */
 void sigchld_handler(int s) {
     int saved_errno = errno;
     pid_t pid;
     
-    // Reap all terminated children
     while((pid = waitpid(-1, NULL, WNOHANG)) > 0) {
-        // Find which port this child was handling and mark it as free
+        // Find which port this child was handling and mark its PAIR as free
         for (int i = 0; i < MAX_SERVICE_PORTS; i++) {
             if (service_ports[i].pid == pid) {
-                printf("Child process %d finished. Port %d is now free.\n", pid, service_ports[i].port);
-                service_ports[i].in_use = 0;
-                service_ports[i].pid = 0;
-                break;
+                // Determine the start of the pair
+                int base_index = (i % 2 == 0) ? i : i - 1;
+                
+                printf("Child process %d finished. Port pair %d/%d is now free.\n",
+                       pid, service_ports[base_index].port, service_ports[base_index+1].port);
+                
+                // Free both ports in the pair
+                service_ports[base_index].in_use = 0;
+                service_ports[base_index].pid = 0;
+                service_ports[base_index+1].in_use = 0;
+                service_ports[base_index+1].pid = 0;
+                
+                break; // We've cleaned up for this pid, so break inner loop
             }
         }
     }
@@ -262,21 +272,14 @@ void sigchld_handler(int s) {
 }
 
 
-// --- Unchanged Functions from original code ---
+// --- Unchanged Functions ---
 
-/**
- * @brief Handles all communication for a single connected client.
- * This function runs inside a dedicated child process.
- */
 void handle_client(int client_socket, int port) {
     char buffer[1024];
     long valread;
-
-    // Greet the client
     char welcome_msg[64];
     snprintf(welcome_msg, sizeof(welcome_msg), "Welcome! You are connected to service port %d\n", port);
     send(client_socket, welcome_msg, strlen(welcome_msg), 0);
-
 
     while((valread = read(client_socket, buffer, 1024)) > 0) {
         buffer[valread] = '\0';
@@ -298,10 +301,6 @@ void handle_client(int client_socket, int port) {
     close(client_socket);
 }
 
-
-/**
- * @brief Finds and prints the server's non-loopback IPv4 address.
- */
 void print_server_ip() {
     struct ifaddrs *ifaddr, *ifa;
     int s;

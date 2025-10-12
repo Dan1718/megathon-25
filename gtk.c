@@ -508,6 +508,7 @@ static void on_buffer_remove_tag(GtkTextBuffer *buffer, GtkTextTag *tag, GtkText
 }
 
 
+
 // --- Main Application Cleanup ---
 
 static void cleanup_widgets_data(gpointer user_data) {

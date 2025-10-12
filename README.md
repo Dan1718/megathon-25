@@ -49,3 +49,10 @@ Who's doing what
 **Dan** : Working on websocket implementation.
 - sockets.c 
 	- Has whatever methods Dan can think of 
+
+------------
+THIS CODE DOES NOT WORK. 
+We have successfully created a rich text editor (a very good one made in C btw) , a client server interaction, a system for encrypting and authentication of users with user sign up login and permissions. 
+Unfortunately, we were unable to complete a working combined model within the time constraints. 
+
+The Login file was not pushed, due to... problems in uploading. it works though! 
